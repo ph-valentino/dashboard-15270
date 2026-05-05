@@ -368,14 +368,29 @@ export default function App() {
     const necessarioComplementar = Math.max(0, impostoMinimoDevido - irPagoDefinitivo);
 
     // ── Passo 4: Considera IRRF Dividendos
-    //    saldo > 0 → restituir | saldo < 0 → complementar
-    const creditoTotal = irPagoDefinitivo + irRetidoDividendos;
-    const saldoFinal   = creditoTotal - impostoMinimoDevido;
-    const valorRestituir       = Math.max(0,  saldoFinal);
-    const valorAdicionalAPagar = Math.max(0, -saldoFinal);
+    // IMPORTANTE: a restituição é LIMITADA ao IRRF Div.
+    // Excesso de IR pago definitivo (acima do IRPFM) NÃO é restituído.
+    //
+    // Lógica:
+    //   • Se IR pago def. ≥ IRPFM (não há complemento):
+    //       → restituição = IRRF Div integral (todos os 10% antecipados voltam)
+    //       → a pagar = 0
+    //   • Se IR pago def. < IRPFM (há complemento):
+    //       → IRRF Div abate o complemento
+    //       → se sobrar IRRF Div → restitui o que sobrou (max IRRF Div)
+    //       → se faltar → cliente paga a diferença
+    const valorRestituir       = irPagoDefinitivo >= impostoMinimoDevido
+      ? irRetidoDividendos
+      : Math.max(0, irRetidoDividendos - necessarioComplementar);
+    const valorAdicionalAPagar = Math.max(0, necessarioComplementar - irRetidoDividendos);
+
+    // Crédito efetivamente útil (limitado ao IRPFM)
+    const creditoUtil  = Math.min(irPagoDefinitivo + irRetidoDividendos, impostoMinimoDevido);
+    const creditoTotal = irPagoDefinitivo + irRetidoDividendos; // mantido para exibição
+    const saldoFinal   = valorRestituir - valorAdicionalAPagar; // > 0 restituir | < 0 pagar
 
     const razaoCobertura = impostoMinimoDevido > 0
-      ? creditoTotal / impostoMinimoDevido
+      ? creditoUtil / impostoMinimoDevido
       : 1;
 
     let faixa;
@@ -401,7 +416,12 @@ export default function App() {
     const rendimentoBrutoNecessario = margemRF > 0 ? valorAdicionalAPagar / margemRF : 0;
 
     // ── ALVO IDEAL: "isenção" dos dividendos
-    // Capital tal que IR pago definitivo (IRPF trad + IR exterior + IR RF) = IRPFM
+    // PONTO ÓTIMO: IR pago definitivo = IRPFM
+    // Atingido esse ponto, todo o IRRF Div vira restituição integral.
+    // ATENÇÃO: ultrapassar o alvo NÃO gera restituição extra — o excesso
+    // de IR pago (acima do IRPFM) é simplesmente perdido para o fisco.
+    // Por isso o capital alvo de "isenção" é também o capital MÁXIMO útil
+    // em RF tributada para fins de otimização do IRPFM.
     let capitalAlvoIsencao = null;
     if (margemRF > 0 && necessarioComplementar > 0) {
       const calcCap = (pct) => {
@@ -424,9 +444,14 @@ export default function App() {
       const aliq  = calcularAliquotaMinima(renda);
       const irpfm = renda * aliq;
       const irPagoDef = irpfTradicional + irExterior + irRF;
-      const credTotal = irPagoDef + irRetidoDividendos;
-      const saldo = credTotal - irpfm;       // > 0 restituir | < 0 complementar
-      return { renda, irpfm, irPagoDef, saldo };
+      const falta = Math.max(0, irpfm - irPagoDef);
+      // Restituição é LIMITADA ao IRRF Div (excesso de IR pago não volta)
+      const restituir = irPagoDef >= irpfm
+        ? irRetidoDividendos
+        : Math.max(0, irRetidoDividendos - falta);
+      const aPagar = Math.max(0, falta - irRetidoDividendos);
+      const saldo  = restituir - aPagar;
+      return { renda, irpfm, irPagoDef, saldo, restituir, aPagar };
     };
 
     // CDB: usa fator/aliq da simulação tributada (já calculados acima)
@@ -490,8 +515,11 @@ export default function App() {
     // Status principal: restituir / complementar / equilibrado
     if (calc.impostoMinimoDevido === 0) {
       arr.push({ tom: 'success', titulo: 'Sem IRPFM devido', texto: 'Renda total abaixo de R$ 600k — fora do gatilho da Lei 15.270.' });
+    } else if (calc.irPagoDefinitivo > calc.impostoMinimoDevido + 1000) {
+      const irPerdido = calc.irPagoDefinitivo - calc.impostoMinimoDevido;
+      arr.push({ tom: 'amber', titulo: `IR pago acima do IRPFM: ${fmtBRL(irPerdido)} perdido`, texto: `O IR pago definitivo (${fmtBRL(calc.irPagoDefinitivo)}) excede o IRPFM (${fmtBRL(calc.impostoMinimoDevido)}). Esse excesso NÃO é restituído — fica retido pelo fisco. Restituição capada em ${fmtBRL(calc.irRetidoDividendos)} (IRRF Div). Considerar reduzir capital tributado, alongar prazo ou migrar parte para isentos.` });
     } else if (calc.valorRestituir > 1000) {
-      arr.push({ tom: 'success', titulo: `Restituição prevista: ${fmtBRL(calc.valorRestituir)}`, texto: `Os créditos totais (${fmtBRL(calc.creditoTotal)}) excedem o IRPFM (${fmtBRL(calc.impostoMinimoDevido)}). O saldo é restituído na declaração anual.` });
+      arr.push({ tom: 'success', titulo: `Restituição prevista: ${fmtBRL(calc.valorRestituir)}`, texto: `IR pago definitivo (${fmtBRL(calc.irPagoDefinitivo)}) cobre integralmente o IRPFM (${fmtBRL(calc.impostoMinimoDevido)}). Os ${fmtBRL(calc.valorRestituir)} retidos sobre dividendos voltam na declaração anual${calc.valorRestituir < calc.irRetidoDividendos ? ' (parcialmente abatidos pelo complemento)' : ' integralmente'}.` });
     } else if (calc.valorAdicionalAPagar > 100) {
       arr.push({ tom: 'amber', titulo: `Adicional a complementar: ${fmtBRL(calc.valorAdicionalAPagar)}`, texto: `IRPFM (${fmtBRL(calc.impostoMinimoDevido)}) maior que créditos (${fmtBRL(calc.creditoTotal)}). Cada R$ 1 de rendimento RF contribui ${fmtPct(calc.margemRF)} líquido para fechar o gap.` });
     } else {
@@ -1205,9 +1233,9 @@ export default function App() {
                 </div>
 
                 <div className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-4">
-                  <p className="text-[11px] uppercase tracking-[0.18em] text-zinc-500 mb-2 font-medium">Por que esse alvo gera "isenção" dos dividendos?</p>
+                  <p className="text-[11px] uppercase tracking-[0.18em] text-zinc-500 mb-2 font-medium">Por que esse alvo é o ponto ótimo (não é "quanto mais melhor")</p>
                   <p className="text-[12.5px] text-zinc-300 leading-relaxed">
-                    No ponto de equilíbrio, IR pago def. = IRPFM. Como o IRRF Dividendos é antecipação do mesmo IRPFM, ele <em>passa a ser pura sobreposição</em> e a Receita restitui 100% na declaração — o cliente fica efetivamente "isento" sobre a distribuição (já tendo sido tributado na fonte do investimento RF a {fmtPct(aliqRetencao)}).
+                    No ponto onde IR pago def. = IRPFM, todo o IRRF Dividendos vira restituição integral. <strong className="text-amber-300">Atenção:</strong> ultrapassar esse capital NÃO gera mais restituição — o excesso de IR pago acima do IRPFM é simplesmente perdido para o fisco. Esse é o teto matemático da otimização.
                     {calc.faixa !== 'piso' && <span className="block mt-2 text-amber-300/80 text-[11px] italic">Atenção: cliente fora do piso de 10%. Cálculo assume piso ao adicionar capital — verifique se a alocação manterá a renda total acima de R$ 1,2M.</span>}
                   </p>
                 </div>
@@ -1327,11 +1355,12 @@ export default function App() {
                 <p className="text-[11.5px] text-zinc-400 leading-relaxed">
                   {calc.comparativo.melhor === 'cdb' ? (
                     <>
-                      O CDB rende {fmtBRLcompact(calc.comparativo.cdb.liquido)} líquido e gera {fmtBRLcompact(calc.comparativo.cdb.ir)} de IR como crédito contra o IRPFM. Esse crédito {calc.comparativo.cdb.saldo > calc.comparativo.lca.saldo ? 'aumenta a restituição (ou reduz o complemento)' : 'compensa parte do IRPFM'}, fazendo o ganho efetivo total ({fmtBRLcompact(calc.comparativo.cdb.resultado)}) superar o da LCA ({fmtBRLcompact(calc.comparativo.lca.resultado)}). A LCA é "isenta" mas <em>não gera crédito</em> — o IRRF dos dividendos continua sendo um custo (ou menor restituição).
+                      O CDB rende {fmtBRLcompact(calc.comparativo.cdb.liquido)} líquido e gera {fmtBRLcompact(calc.comparativo.cdb.ir)} de IR pago definitivo, que abate o IRPFM. Esse abatimento {calc.comparativo.cdb.saldo > calc.comparativo.lca.saldo ? 'aumenta a restituição (ou reduz o complemento)' : 'compensa parte do IRPFM'}, fazendo o ganho efetivo total ({fmtBRLcompact(calc.comparativo.cdb.resultado)}) superar o da LCA ({fmtBRLcompact(calc.comparativo.lca.resultado)}).{' '}
+                      <strong className="text-amber-300">Atenção:</strong> a restituição é limitada ao IRRF Div ({fmtBRLcompact(calc.irRetidoDividendos)}) — IR pago acima do IRPFM é perdido.
                     </>
                   ) : (
                     <>
-                      A LCA rende {fmtBRLcompact(calc.comparativo.lca.liquido)} totalmente líquido e <em>não entra na base do IRPFM</em>. Mesmo a {(pctCDILCA*100).toFixed(0)}% do CDI (vs {(pctCDI*100).toFixed(0)}% do CDB), o ganho efetivo da LCA ({fmtBRLcompact(calc.comparativo.lca.resultado)}) supera o do CDB ({fmtBRLcompact(calc.comparativo.cdb.resultado)}) porque o CDB ainda perde IR e infla a base do IRPFM, drenando parte do crédito gerado.
+                      A LCA rende {fmtBRLcompact(calc.comparativo.lca.liquido)} totalmente líquido e <em>não entra na base do IRPFM</em>. Mesmo a {(pctCDILCA*100).toFixed(0)}% do CDI (vs {(pctCDI*100).toFixed(0)}% do CDB), o ganho efetivo da LCA ({fmtBRLcompact(calc.comparativo.lca.resultado)}) supera o do CDB ({fmtBRLcompact(calc.comparativo.cdb.resultado)}) porque o CDB perde IR sobre o rendimento e ainda infla a base do IRPFM. {calc.comparativo.cdb.aPagar < calc.comparativo.lca.aPagar ? '' : 'Como a restituição é capada no IRRF Div, o IR retido do CDB acima do IRPFM seria perdido.'}
                     </>
                   )}
                 </p>
